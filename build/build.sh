@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+mkdir -p "$root/dist"
+mojo build --emit shared-lib "$root/src/capi.mojo" -o "$root/dist/libmojo-cutadapt.so"
