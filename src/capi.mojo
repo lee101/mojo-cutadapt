@@ -1,6 +1,7 @@
 """C ABI for Cutadapt's hybrid semiglobal alignment kernel."""
 
 from std.sys.info import simd_width_of as simdwidthof
+from std.math import iota
 
 comptime BPtr = UnsafePointer[UInt8, AnyOrigin[mut=True]]
 comptime IPtr = UnsafePointer[Int, AnyOrigin[mut=True]]
@@ -60,7 +61,31 @@ def mca_locate(
         if min_n < 0:
             min_n = 0
 
-    for i in range(reference_length + 1):
+    comptime W = simdwidthof[DType.float64]()
+    var init_i = 0
+    while init_i + W <= reference_length + 1:
+        var lanes = iota[DType.int, W](init_i)
+        var zeroes = SIMD[DType.int, W](0)
+        var minimum = SIMD[DType.int, W](min_n)
+        if not start_in_reference and not start_in_query:
+            scores.store(init_i, -2 * lanes)
+            costs.store(init_i, max(lanes, minimum) * indel_cost)
+            origins.store(init_i, zeroes)
+        elif start_in_reference and not start_in_query:
+            scores.store(init_i, zeroes)
+            costs.store(init_i, minimum * indel_cost)
+            origins.store(init_i, min(zeroes, minimum - lanes))
+        elif not start_in_reference and start_in_query:
+            scores.store(init_i, -2 * lanes)
+            costs.store(init_i, lanes * indel_cost)
+            origins.store(init_i, max(zeroes, minimum - lanes))
+        else:
+            scores.store(init_i, zeroes)
+            costs.store(init_i, min(lanes, minimum) * indel_cost)
+            origins.store(init_i, minimum - lanes)
+        init_i += W
+
+    for i in range(init_i, reference_length + 1):
         if not start_in_reference and not start_in_query:
             scores[i] = -2 * i
             costs[i] = (i if i > min_n else min_n) * indel_cost

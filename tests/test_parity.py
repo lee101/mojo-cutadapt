@@ -42,6 +42,15 @@ def test_random_nonwildcard_alignment_parity():
         assert actual == expected
 
 
+@pytest.mark.parametrize("flags", [0, 1, 2, 3])
+def test_simd_initialization_tail_matches_upstream(flags):
+    reference = "ACGTACGT"
+    query = "TTACGTACGTT"
+    actual = Aligner(reference, 0.25, flags, min_overlap=3).locate(query)
+    expected = UpstreamAligner(reference, 0.25, flags, min_overlap=3).locate(query)
+    assert actual == expected
+
+
 @pytest.mark.parametrize("ours,upstream,query", [
     (PrefixComparer, UpstreamPrefixComparer, "ACGTACGTT"),
     (SuffixComparer, UpstreamSuffixComparer, "TTACGTACGTA"),

@@ -40,8 +40,9 @@ print(match.remainder_interval())
 
 `src/capi.mojo` is the sole compilation unit. Its C ABI accepts byte-buffer
 addresses and caller-owned `Int` work buffers. The kernel validates the raw
-arguments before dereferencing them; the Python bridge keeps NumPy views alive
-through the call and locks each mutable workspace. The kernel holds one
+arguments before dereferencing them; the Python bridge passes the immutable
+ASCII query buffer zero-copy, caches the NumPy workspace addresses, and locks
+each mutable workspace. The kernel holds one
 dynamic-programming column per adapter base: cost, score, and signed origin.
 This uses linear extra memory and preserves Cutadapt's hybrid cost/score and
 endpoint-selection behavior.
@@ -56,25 +57,27 @@ aligner and return compatible coordinate-bearing match objects.
 
 `pixi run test` compares the covered API to the installed Cutadapt extension:
 fixed vectors, randomized non-wildcard alignments across flags and costs,
-wildcard cases, SIMD-tail anchored comparers, adapter trimming outcomes, and
-raw-ABI argument rejection. Each API item in the covered-subset list has an
-exercising parity or regression test.
+wildcard cases, SIMD initialization and Hamming tails, adapter trimming
+outcomes, and raw-ABI argument rejection. Each API item in the covered-subset
+list has an exercising parity or regression test.
 
 Measured with `pixi run bench` on x86_64, Python 3.13.14:
 
 | kernel | mojo-cutadapt | cutadapt 5.2 | relative |
 | --- | ---: | ---: | ---: |
-| 34 nt 3' adapter vs 139 nt read | 25.1 us | 6.3 us | 3.95x slower |
-| 34 nt prefix no-indel comparer vs 139 nt read | 10.9 us | 0.3 us | 40.90x slower |
-| 34 nt suffix no-indel comparer vs 139 nt read | 10.9 us | 0.7 us | 15.80x slower |
+| 34 nt 3' adapter vs 139 nt read | 14.9 us | 6.6 us | 2.28x slower |
+| 34 nt prefix no-indel comparer vs 139 nt read | 1.3 us | 0.3 us | 4.67x slower |
+| 34 nt suffix no-indel comparer vs 139 nt read | 1.4 us | 0.8 us | 1.84x slower |
 
-The general semiglobal DP recurrence has loop-carried dependencies, so one
-alignment cannot be usefully SIMD-vectorized or parallelized across cells.
-The anchored no-indel comparers use SIMD Hamming comparison with an unaligned
-load-safe scalar tail. GPU execution is intentionally not used: these small,
-memory-bound alignments do not have enough independent arithmetic to offset
-device-transfer and launch costs. Re-run `pixi run bench` on your machine for
-local measurements.
+The independent DP-column initialization is SIMD-vectorized with a scalar tail.
+The general recurrence has loop-carried dependencies, so one alignment cannot
+be usefully parallelized across cells. Anchored no-indel comparers return exact
+prefix or suffix matches without crossing the FFI boundary; mismatch counting
+uses SIMD Hamming comparison with unaligned loads and a scalar tail. There is no
+batch kernel with enough independent work to justify a thread-launch threshold.
+GPU execution is intentionally not used: these small, memory-bound kernels are
+well below two arithmetic operations per byte and cannot offset device transfer
+and launch costs. Re-run `pixi run bench` on your machine for local measurements.
 
 ## Development
 

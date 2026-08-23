@@ -146,15 +146,14 @@ class Aligner:
     def locate(self, query: str) -> Optional[tuple[int, int, int, int, int, int]]:
         if not isinstance(query, str):
             raise TypeError("query must be a str")
-        query = query.upper()
+        if not query.isascii():
+            raise ValueError("query must contain only ASCII characters")
+        if not query.isupper():
+            query = query.upper()
         if self.wildcard_ref or self.wildcard_query:
             return _python_locate(self.reference, query, self.max_error_rate, self.flags,
                                   self.wildcard_ref, self.wildcard_query, self.indel_cost, self.min_overlap)
-        try:
-            query_bytes = query.encode("ascii")
-        except UnicodeEncodeError as error:
-            raise ValueError("query must contain only ASCII characters") from error
-        return _lib.locate(query_bytes, self.max_error_rate,
+        return _lib.locate(query, self.max_error_rate,
                            self.flags, self.indel_cost, self.min_overlap, self._workspace)
 
 
@@ -167,14 +166,19 @@ class PrefixComparer(Aligner):
     def locate(self, query: str) -> Optional[tuple[int, int, int, int, int, int]]:
         if not isinstance(query, str):
             raise TypeError("query must be a str")
-        query = query.upper()
+        if not query.isascii():
+            raise ValueError("query must contain only ASCII characters")
+        if not query.isupper():
+            query = query.upper()
         if self.wildcard_ref or self.wildcard_query:
             return Aligner.locate(self, query)
-        try:
-            query_bytes = query.encode("ascii")
-        except UnicodeEncodeError as error:
-            raise ValueError("query must contain only ASCII characters") from error
-        return _lib.hamming(query_bytes, self.max_error_rate,
+        length = min(len(self.reference), len(query))
+        if length >= self.min_overlap and (
+            query.startswith(self.reference) if len(self.reference) <= len(query)
+            else self.reference.startswith(query)
+        ):
+            return (0, length, 0, length, length, 0)
+        return _lib.hamming(query, self.max_error_rate,
                             False, self.min_overlap, self._workspace)
 
 
@@ -187,12 +191,19 @@ class SuffixComparer(PrefixComparer):
     def locate(self, query: str) -> Optional[tuple[int, int, int, int, int, int]]:
         if not isinstance(query, str):
             raise TypeError("query must be a str")
-        query = query.upper()
+        if not query.isascii():
+            raise ValueError("query must contain only ASCII characters")
+        if not query.isupper():
+            query = query.upper()
         if self.wildcard_ref or self.wildcard_query:
             return Aligner.locate(self, query)
-        try:
-            query_bytes = query.encode("ascii")
-        except UnicodeEncodeError as error:
-            raise ValueError("query must contain only ASCII characters") from error
-        return _lib.hamming(query_bytes, self.max_error_rate,
+        length = min(len(self.reference), len(query))
+        if length >= self.min_overlap and (
+            query.endswith(self.reference) if len(self.reference) <= len(query)
+            else self.reference.endswith(query)
+        ):
+            reference_start = len(self.reference) - length
+            query_start = len(query) - length
+            return (reference_start, len(self.reference), query_start, len(query), length, 0)
+        return _lib.hamming(query, self.max_error_rate,
                             True, self.min_overlap, self._workspace)
