@@ -118,6 +118,67 @@ accumulate in parallel) and dropping bounds checks (the compiler's checks are
 already folded into the loop bounds). The result is bit-identical to the previous
 kernel; the summation order did not change, so there is no last-bit caveat.
 
+### PARALLEL phase
+
+This phase looked for work to split across cores and found none that wins, so
+nothing was kept: the kernel is still the serial one from the SIMD phase, and
+there is no before/after difference to report.
+
+Measured on the same machine, no code changed (median of five runs):
+
+| adapter nt | 139 nt read | 1000 nt read | 4000 nt read |
+| ---: | ---: | ---: | ---: |
+| 34 (the benchmark row) | 10.0 us | 16.2 us | 36.6 us |
+| 128 | 32.2 us | 37.4 us | 54.8 us |
+| 512 | 57.3 us | 380.6 us | 397.7 us |
+| 1024 | 80.8 us | 1403.7 us | 1477.8 us |
+| 2048 | 130.3 us | 1778.3 us | 5801.1 us |
+
+One `parallelize` call costs this host about 5 ms before it does any work, at
+any worker count from 2 to 8 (3 runs; `bench/par_floor.py`):
+
+| workers | launch+join (empty work) | 1 ms per worker | same work serial | speedup |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | inline, no threads | 1.1-1.3 ms | 1.1-1.3 ms | ~1.0x |
+| 2 | 4.8-5.8 ms | 6.0-6.7 ms | 2.2-2.6 ms | 0.36-0.41x |
+| 4 | 4.7-5.4 ms | 5.8-6.9 ms | 4.3-5.4 ms | 0.68-0.83x |
+| 8 | 4.6-5.3 ms | 5.9-6.3 ms | 8.8-9.6 ms | 1.49-1.57x |
+
+So the gain does not just flatten at 2 and 4 threads, it reverses: 5 ms of
+launch and join against a 10 us call. The 8-worker row only looks positive
+because its serial baseline is 9 ms of work, which no real adapter produces.
+There is therefore no size threshold above which a parallel path beats the
+serial one for a caller of this package, which is why nothing shipped.
+
+The 5 ms is a property of the shared-library build, not of Python. The same
+`parallelize` workload compiled as an executable costs 21-35 us per call; as a
+shared library it costs 5.1-5.6 ms per call, and a native C `dlopen` driver
+sees the same 5 ms without Python in the process:
+
+| build of the same source | workers 2 | workers 4 | workers 8 |
+| --- | ---: | ---: | ---: |
+| executable | 14-23 us | 20-34 us | 23-35 us |
+| shared library, native C driver | 5.18-5.42 ms | 5.17-5.47 ms | 4.95-5.44 ms |
+| shared library, ctypes driver | 5.05-5.27 ms | 4.85-5.77 ms | 5.05-6.35 ms |
+
+This package ships a shared library, so the last two rows are the ones that
+would apply to a parallel kernel.
+
+The dependency structure says the same thing. In the DP row fill, cell
+`(i, j)` reads `(i-1, j)`, `(i, j-1)` and `(i-1, j-1)`, so no two cells in a
+row are independent and row `j` needs all of row `j-1`. The only legal split is
+an anti-diagonal wavefront, which costs one barrier per diagonal (about
+`reference_length + query_length` of them for ~1000 cells), and the band shrink
+is a scalar loop-carried dependency that feeds the final column scan, so
+splitting by row would change results rather than order.
+
+Because no parallel path shipped, there is no serial-vs-parallel test to add;
+the existing whole-table differential test in `tests/test_kernel_tables.py`
+still pins the kernel's output. `bench/par_floor.mojo`/`.py` re-take the launch
+measurement and `bench/par_dual.mojo`/`.py` re-take the executable-vs-library
+comparison; building them needs `pixi add 'max==26.7.0.dev2026092605'`, which is
+not a dependency of the shipped library.
+
 ### Tests added
 
 `tests/test_parity.py` now covers the SIMD tail boundaries for both vectorised
@@ -135,8 +196,9 @@ The independent DP-column initialization is SIMD-vectorized with a scalar tail.
 The general recurrence has loop-carried dependencies, so one alignment cannot
 be usefully parallelized across cells. Anchored no-indel comparers return exact
 prefix or suffix matches without crossing the FFI boundary; mismatch counting
-uses SIMD Hamming comparison with unaligned loads and a scalar tail. There is no
-batch kernel with enough independent work to justify a thread-launch threshold.
+uses SIMD Hamming comparison with unaligned loads and a scalar tail. A
+thread-launch threshold was measured rather than assumed and did not pay off;
+see the PARALLEL phase section above for the numbers.
 GPU execution is intentionally not used: these small, memory-bound kernels are
 well below two arithmetic operations per byte and cannot offset device transfer
 and launch costs. Re-run `pixi run bench` on your machine for local measurements.
