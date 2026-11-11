@@ -199,9 +199,36 @@ prefix or suffix matches without crossing the FFI boundary; mismatch counting
 uses SIMD Hamming comparison with unaligned loads and a scalar tail. A
 thread-launch threshold was measured rather than assumed and did not pay off;
 see the PARALLEL phase section above for the numbers.
-GPU execution is intentionally not used: these small, memory-bound kernels are
-well below two arithmetic operations per byte and cannot offset device transfer
-and launch costs. Re-run `pixi run bench` on your machine for local measurements.
+
+GPU execution is intentionally not used: see the GPU phase section below.
+Re-run `pixi run bench` on your machine for local measurements.
+
+### GPU phase
+
+CPU only: memory-bound.
+
+The GPU phase was gated twice and stopped before any device code was written,
+so the library still imports nothing from `max.gpu` and there is no GPU path,
+no GPU test, and no before/after GPU number to report.
+
+**Arithmetic intensity (`bench/analysis.md`).** The two exported kernels are
+`mca_locate` and `mca_hamming`. Both work on u8 bases and int64 DP columns in
+place, with a bounded number of scalar operations per DP cell (`mca_locate`) or
+a compare-and-count per byte (`mca_hamming`). Neither reaches roughly 2 flops
+per byte, the candidate threshold: they are memory-bound. `bench/analysis.md`
+records the measured behaviour that follows from it — a 34 nt Hamming pass is
+~1.4 us above the 2.3 us ctypes floor, and the DP gains in earlier phases came
+from removing scalar work, not from adding arithmetic to amortise over bytes.
+
+**Shared GPU.** `nvidia-smi --query-gpu=memory.free --format=csv,noheader`
+reported `2999 MiB` free (2026-11-11), under the 4000 MiB floor, so the phase
+skips. Both conditions would have had to pass to proceed.
+
+What this means for the numbers above: the CPU kernels in the tables are the
+only path and should be read as CPU-only. The PARALLEL phase already measured a
+dispatch at ~5 ms on this host against a ~10 us `locate` call, so transfer and
+launch would have to clear that gap before a GPU copy-in/copy-out was even
+worth adding.
 
 ## Development
 
