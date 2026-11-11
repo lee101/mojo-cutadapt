@@ -61,13 +61,34 @@ wildcard cases, SIMD initialization and Hamming tails, adapter trimming
 outcomes, and raw-ABI argument rejection. Each API item in the covered-subset
 list has an exercising parity or regression test.
 
-Measured with `pixi run bench` on x86_64, Python 3.13.14:
+Measured with `pixi run bench` on x86_64 (Intel Xeon E5-2697 v4), Python 3.13.14.
+"before" is the previous kernel and "after" is this one, each run five times and
+taken as the median:
 
-| kernel | mojo-cutadapt | cutadapt 5.2 | relative |
-| --- | ---: | ---: | ---: |
-| 34 nt 3' adapter vs 139 nt read | 14.9 us | 6.6 us | 2.28x slower |
-| 34 nt prefix no-indel comparer vs 139 nt read | 1.3 us | 0.3 us | 4.67x slower |
-| 34 nt suffix no-indel comparer vs 139 nt read | 1.4 us | 0.8 us | 1.84x slower |
+| kernel | before | after | change | cutadapt 5.2 | relative |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 34 nt 3' adapter vs 139 nt read | 14.3 us | 11.5 us | -20% | 6.2 us | 1.9x slower |
+| 34 nt prefix no-indel comparer vs 139 nt read | 1.2 us | 1.2 us | unchanged | 0.3 us | unchanged |
+| 34 nt suffix no-indel comparer vs 139 nt read | 1.3 us | 1.3 us | unchanged | 0.7 us | unchanged |
+
+The comparer rows are unchanged because a perfect prefix or suffix match returns
+before the FFI boundary, and a mismatch only reaches the SIMD Hamming kernel.
+The 3' row improves as follows:
+
+- The DP interior is unrolled in fixed 8-cell strips with `comptime for`, and the
+  band end is hoisted to the row. The scalar remainder keeps the existing
+  loop-carried semantics.
+- The diagonal cell is carried in registers across a row, and the two neighbour
+  values are loaded only where the match, deletion, or insertion branch that
+  needs each of them is taken, rather than unconditionally every iteration.
+- The init and selection phases now use `unsafe_load`/`unsafe_store` on indices
+  the existing loops already bound; there are no new index assumptions.
+
+Two techniques from this phase did not pay and were reverted: multi-accumulator
+reductions (the recurrence is a strict diagonal chain, so there is nothing to
+accumulate in parallel) and dropping bounds checks (the compiler's checks are
+already folded into the loop bounds). The result is bit-identical to the previous
+kernel; the summation order did not change, so there is no last-bit caveat.
 
 The independent DP-column initialization is SIMD-vectorized with a scalar tail.
 The general recurrence has loop-carried dependencies, so one alignment cannot

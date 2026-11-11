@@ -3,8 +3,107 @@
 from std.sys.info import simd_width_of as simdwidthof
 from std.math import iota
 
-comptime BPtr = UnsafePointer[UInt8, AnyOrigin[mut=True]]
-comptime IPtr = UnsafePointer[Int, AnyOrigin[mut=True]]
+comptime BPtr = Pointer[UInt8, AnyOrigin[mut=True]]
+comptime IPtr = Pointer[Int, AnyOrigin[mut=True]]
+comptime STRIP = 8
+
+
+@always_inline
+def _fill_cell(
+    reference: BPtr,
+    costs: IPtr,
+    scores: IPtr,
+    origins: IPtr,
+    index: Int,
+    query_byte: UInt8,
+    indel_cost: Int,
+    carried_cost: Int,
+    carried_score: Int,
+    carried_origin: Int,
+) -> Tuple[Int, Int, Int, Int, Int, Int]:
+    """One cell. Ties resolve diagonal, then deletion, then insertion.
+
+    Returns the chosen (cost, score, origin) and the next diagonal cell.
+    """
+    var old_cost = costs.unsafe_load(index)
+    var old_origin = origins.unsafe_load(index)
+    var chosen_cost = 0
+    var chosen_score = 0
+    var chosen_origin = 0
+    if reference.unsafe_load(index - 1) == query_byte:
+        chosen_cost = carried_cost
+        chosen_score = carried_score + 1
+        chosen_origin = carried_origin
+    else:
+        var cost_diag = carried_cost + 1
+        var cost_insertion = old_cost + indel_cost
+        var cost_deletion = costs.unsafe_load(index - 1) + indel_cost
+        if cost_diag <= cost_deletion and cost_diag <= cost_insertion:
+            chosen_cost = cost_diag
+            chosen_score = carried_score - 1
+            chosen_origin = carried_origin
+        elif cost_deletion <= cost_insertion:
+            chosen_cost = cost_deletion
+            chosen_score = scores.unsafe_load(index - 1) - 2
+            chosen_origin = origins.unsafe_load(index - 1)
+        else:
+            chosen_cost = cost_insertion
+            chosen_score = scores.unsafe_load(index) - 2
+            chosen_origin = old_origin
+    return (chosen_cost, chosen_score, chosen_origin, old_cost, scores.unsafe_load(index), old_origin)
+
+
+def _fill_row(
+    reference: BPtr,
+    query: BPtr,
+    costs: IPtr,
+    scores: IPtr,
+    origins: IPtr,
+    stop: Int,
+    j: Int,
+    indel_cost: Int,
+    diag_cost: Int,
+    diag_score: Int,
+    diag_origin: Int,
+) -> Int:
+    """Fill costs/scores/origins[1..stop] for query row j; return the last origin.
+
+    `stop` is fixed for the whole row, so the interior runs in unrolled strips
+    and only the remainder is a plain loop. The diagonal cell is carried in
+    registers across the row, one step behind the left cell.
+    """
+    var query_byte = query.unsafe_load(j - 1)
+    var carried_cost = diag_cost
+    var carried_score = diag_score
+    var carried_origin = diag_origin
+    var i = 1
+    while i + STRIP <= stop:
+        comptime for lane in range(STRIP):
+            var index = i + lane
+            var (cost, score, origin, next_cost, next_score, next_origin) = _fill_cell(
+                reference, costs, scores, origins, index, query_byte, indel_cost,
+                carried_cost, carried_score, carried_origin)
+            carried_cost = next_cost
+            carried_score = next_score
+            carried_origin = next_origin
+            costs.unsafe_store(index, cost)
+            scores.unsafe_store(index, score)
+            origins.unsafe_store(index, origin)
+        i += STRIP
+    var last_origin = carried_origin
+    while i <= stop:
+        var (cost, score, origin, next_cost, next_score, next_origin) = _fill_cell(
+            reference, costs, scores, origins, i, query_byte, indel_cost,
+            carried_cost, carried_score, carried_origin)
+        carried_cost = next_cost
+        carried_score = next_score
+        carried_origin = next_origin
+        costs.unsafe_store(i, cost)
+        scores.unsafe_store(i, score)
+        origins.unsafe_store(i, origin)
+        last_origin = origin
+        i += 1
+    return last_origin
 
 
 @export("mca_locate")
@@ -117,61 +216,28 @@ def mca_locate(
     var stale_origin = 0
 
     for j in range(min_n + 1, max_n + 1):
-        var diag_cost = costs[0]
-        var diag_score = scores[0]
-        var diag_origin = origins[0]
+        var diag_cost = costs.unsafe_load(0)
+        var diag_score = scores.unsafe_load(0)
+        var diag_origin = origins.unsafe_load(0)
         if start_in_query:
-            origins[0] += 1
+            origins.unsafe_store(0, diag_origin + 1)
         else:
-            costs[0] += indel_cost
-            scores[0] -= 2
-
-        for i in range(1, last + 1):
-            var old_cost = costs[i]
-            var old_score = scores[i]
-            var old_origin = origins[i]
-            var is_match = reference[i - 1] == query[j - 1]
-            var chosen_cost = 0
-            var chosen_score = 0
-            var chosen_origin = 0
-            if is_match:
-                chosen_cost = diag_cost
-                chosen_score = diag_score + 1
-                chosen_origin = diag_origin
-            else:
-                var cost_diag = diag_cost + 1
-                var cost_insertion = old_cost + indel_cost
-                var cost_deletion = costs[i - 1] + indel_cost
-                if cost_diag <= cost_deletion and cost_diag <= cost_insertion:
-                    chosen_cost = cost_diag
-                    chosen_score = diag_score - 1
-                    chosen_origin = diag_origin
-                elif cost_deletion <= cost_insertion:
-                    chosen_cost = cost_deletion
-                    chosen_score = scores[i - 1] - 2
-                    chosen_origin = origins[i - 1]
-                else:
-                    chosen_cost = cost_insertion
-                    chosen_score = old_score - 2
-                    chosen_origin = old_origin
-            diag_cost = old_cost
-            diag_score = old_score
-            diag_origin = old_origin
-            costs[i] = chosen_cost
-            scores[i] = chosen_score
-            origins[i] = chosen_origin
-            stale_origin = chosen_origin
+            costs.unsafe_store(0, diag_cost + indel_cost)
+            scores.unsafe_store(0, diag_score - 2)
+        if last > 0:
+            stale_origin = _fill_row(reference, query, costs, scores, origins, last, j,
+                                     indel_cost, diag_cost, diag_score, diag_origin)
 
         last_filled = last
-        while last >= 0 and costs[last] > k:
+        while last >= 0 and costs.unsafe_load(last) > k:
             last -= 1
         if last < reference_length:
             last += 1
         elif stop_in_query:
-            var length = reference_length + (origins[reference_length] if origins[reference_length] < 0 else 0)
-            var cost = costs[reference_length]
-            var score = scores[reference_length]
-            var origin = origins[reference_length]
+            var length = reference_length + (origins.unsafe_load(reference_length) if origins.unsafe_load(reference_length) < 0 else 0)
+            var cost = costs.unsafe_load(reference_length)
+            var score = scores.unsafe_load(reference_length)
+            var origin = origins.unsafe_load(reference_length)
             var acceptable = length >= min_overlap and Float64(cost) <= Float64(length) * max_error_rate
             var best_length = reference_length + (best_origin if best_origin < 0 else 0)
             if acceptable and (best_cost == reference_length + query_length + 1 or (origin <= best_origin + reference_length // 2 and score > best_score) or (length > best_length and score > best_score)):
@@ -187,15 +253,16 @@ def mca_locate(
         var first_i = 0 if stop_in_reference else reference_length
         for i in range(first_i, last_filled + 1):
             var reverse_i = last_filled - (i - first_i)
-            var length = reverse_i + (origins[reverse_i] if origins[reverse_i] < 0 else 0)
-            var cost = costs[reverse_i]
-            var score = scores[reverse_i]
+            var origin = origins.unsafe_load(reverse_i)
+            var length = reverse_i + (origin if origin < 0 else 0)
+            var cost = costs.unsafe_load(reverse_i)
+            var score = scores.unsafe_load(reverse_i)
             var acceptable = length >= min_overlap and Float64(cost) <= Float64(length) * max_error_rate
             var best_length = best_ref_stop + (best_origin if best_origin < 0 else 0)
             if acceptable and (best_cost == reference_length + query_length + 1 or (stale_origin <= best_origin + reference_length // 2 and score > best_score) or (length > best_length and score > best_score)):
                 best_score = score
                 best_cost = cost
-                best_origin = origins[reverse_i]
+                best_origin = origin
                 best_ref_stop = reverse_i
                 best_query_stop = query_length
 

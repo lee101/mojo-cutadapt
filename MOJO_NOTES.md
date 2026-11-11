@@ -21,6 +21,22 @@ toolchain bump rather than trusting this file.
 
 - **`fn` has been removed. Use `def` for everything.** `fn` is a hard error:
   `'fn' has been removed; use 'def' instead`.
+- **`@parameter` does not exist. Compile-time unrolling is `comptime for`.**
+  `@parameter for ...` fails with `'for' statement does not support decorators`;
+  `for k in range(comptime(4))` and `for k in range(4, unroll=True)` do not
+  unroll (`unknown declaration 'unroll'`, and a `comptime(4)` bound still emits a
+  runtime loop). `comptime for k in range(4):` does unroll — the body is
+  duplicated with `k` folded in, and nested statement bodies work (branches on
+  the loop variable fold to `cmove`). Verified on this compiler.
+- **`@inline` takes one argument; `@always_inline` is the bare form.**
+  `@inline` alone fails with `@inline decorator takes exactly 1 argument`.
+- **A `SIMD` comparison does not give you a mask by default.** `x == y` on two
+  `SIMD[DType.uint8, W]` values produces a plain `Bool`, so `.select()`,
+  `.reduce_add()`, `.reduce_or()`, `.cast()`, and `eq[lane]` are all rejected on
+  it. `SIMD[DType.bool, W](eq).reduce_or()` works when you already hold a
+  `SIMD[DType.bool, W]`. Use the existing `.eq()` method plus
+  `.select(zero, one).reduce_add()` pattern (as in `mca_hamming`) instead of
+  constructing masks by hand.
 - `UnsafePointer` is deprecated in favour of **`Pointer`**. It still compiles, with
   a warning, so old code builds — but write `Pointer[T, AnyOrigin[mut=True]]`.
 - `int(x)` / `float(x)` are **not builtins**. Use the type as a constructor:
@@ -50,6 +66,13 @@ toolchain bump rather than trusting this file.
   constraint. Take `Int` and construct inside the branch that uses it.
 - `AnyOrigin[mut=True]` is the only usable mutable origin name. `MutableAnyOrigin`
   and friends do not exist.
+- **Measure the bridge before optimising the kernel.** On this box a ctypes call
+  that returns immediately costs ~0.6 us with 1 argument and ~0.35 us more per
+  additional `Int` (~3.7 us at 14 arguments), and that cost lands in every call.
+  A kernel of a few microseconds can therefore be half FFI. Independently measure
+  the empty-call cost before attributing a win to the kernel. A packed/narrower
+  signature only helps if the entry point does not have to stay callable as
+  documented, and going from 14 to 10 arguments still only saved ~0.7 us here.
 
 ## 3. Memory and SIMD (all verified working)
 
