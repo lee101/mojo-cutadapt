@@ -249,8 +249,8 @@ def mca_hamming(
     var one = SIMD[DType.uint8, W](UInt8(1))
     var zero = SIMD[DType.uint8, W](UInt8(0))
     while i + W <= length:
-        var matches = reference.load[width=W, alignment=1](reference_start + i).eq(
-            query.load[width=W, alignment=1](query_start + i)
+        var matches = reference.unsafe_load[width=W, alignment=1](reference_start + i).eq(
+            query.unsafe_load[width=W, alignment=1](query_start + i)
         )
         if not matches.reduce_and():
             errors += Int(matches.select(zero, one).reduce_add()[0])
